@@ -1,0 +1,428 @@
+---
+title: "Intro to tidymodels"
+author: "Ari Weil"
+date: "5/21/2021"
+output: pdf_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+# Intro
+
+There are a lot of packages available for machine learning in R. Today
+I'll introduce one library I've used: `tidymodels`. `tidymodels` has a
+few benefits:
+
+-   Loads several modeling packages in just one library.
+
+-   Uses tidy syntax and easily fits into your broader tidyverse
+    operations (ie using the pipe).
+
+-   Simple to fit different models using the same workflow and syntax,
+    and then easily compare metrics across them.
+
+However, one challenge you'll see is that it can be overly complex and
+involve too many steps if you're just running a simple model. So
+overall, I recommend it if you need to split data, are running multiple
+models, need to tune parameters, and/or want to compare metrics across
+multiple models.
+
+Tidymodeling focuses on three steps:
+
+-   Pre-process: transform the data (scale, normalize, etc.) and split
+    the data into testing and training sets. For more on train/test, see
+    [Pete's
+    tutorial](https://uc-cwg.github.io/2021/02/24/supervised-learning.html).
+
+-   Train: fit the model to the training set. Tune parameters as
+    necessary, and then fit the best model.
+
+-   Validate: fit the model to the testing set, and then evaluate
+    performance metrics.
+
+My focus today will be to introduce the library's main functions and
+give some sample code, rather than focusing on specific models or
+approaches to machine learning (supervised/unsupervised). We'll train
+and tune three models: linear regression, k nearest neighbors
+regression, and a decision tree.
+
+# Code
+
+## Load Library
+
+```{r Load Library, warning = FALSE}
+
+# Load tidymodels (make sure to install first if you don't have it)
+library(tidymodels)
+
+```
+
+```{r View Packages}
+
+# View packages currently loaded
+(.packages())
+
+# Also add two more for timing and parallel processing
+library(tictoc)
+library(doParallel)
+
+```
+
+Another benefit of tidymodels is that it contains many other packages.
+By loading in only tidymodels, we also get the commonly used tidy
+packages `dplyr` and `ggplot2`.
+
+For modeling, `tidymodels` includes three core packages:
+
+-   `rsample`: for splitting the data into train and test.
+
+-   `parsnip`: used to actually build and fit the model.
+
+-   `yardstick`: for evaluating the accuracy and fit of your models.
+
+For additional modeling needs, there is also:
+
+-   `workflow`: combines pre-processing (recipe), modeling, and
+    post-processing into one object.
+
+-   `tune`: great for tuning model parameters and hyperparameters (such
+    as neighbors in kNN or minimum number of trees in a decision tree).
+
+## Pre-process
+
+We'll use the diamonds dataset from `ggplot2`. For the example today, we
+will be trying to predict the price of a diamond using the other
+variables (carat, cut, color, etc).
+
+```{r Data}
+
+diamonds <- ggplot2::diamonds
+
+```
+
+### Splitting Data
+
+I'll demo three ways to split the data in `rsample`: proportion split,
+stratified sample, or k-fold cross validation.
+
+```{r Split}
+
+# Set seed for reproducibility
+set.seed(1234)
+
+## 80-20 train-test split
+split <- initial_split(diamonds, prop = 0.8)
+
+# initial_split then stores the two samples in training() and testing()
+train <- split %>% training()
+test <- split %>% testing()
+
+# Check to see that our split is correct
+dim(train)
+dim(test)
+
+## Stratified sample split
+# This is useful in classification problems when one class is overly represented
+split_strat <- initial_split(diamonds, prop = 0.8, strata = price)
+  
+## Cross-validation
+# If you wanted to do k-fold cross-validation:
+split_cv <- vfold_cv(train, v = 10)
+
+
+```
+
+### Recipe
+
+`tidymodels` uses what are called recipes for other pre-processing
+steps, and these functions come from the `recipes` package. The three
+key functions are:
+
+-   `recipe()`: build a series of data cleaning steps.
+-   `prep()`: apply the steps to the training data.
+-   `bake()`: apply the recipe to the testing data.
+
+Note: I don't use prep/bake, but use workflows instead (more on that in
+a minute).
+
+The key element I use recipes for is setting up your dependent and
+independent variables, with the dv \~ iv + iv2 + iv3 formula from
+`lm()`. But recipes are also great for any final data preparation steps
+you need for a model.
+
+This can be done with the `step_` functions. For example, you can scale
+a variable with `step_center()` to scale the mean to 0 and
+`step_scale()` to scale the data to a standard deviation to 1.
+
+```{r Recipe}
+
+# Set recipe
+# DV is price, and . means all other variables are IVs
+recipe <- recipe(price ~ ., data = diamonds) %>% 
+  step_log(price) %>% # take log of outcome
+  # Normalize all IVs except for the categorical variables
+  step_normalize(all_predictors(), - all_nominal()) %>%
+  # Make dummy variables out of the categorical variables
+  step_dummy(all_nominal())
+
+```
+
+## Train
+
+The actual modeling process involves a model, engine, and workflow.
+
+We'll use three models today:
+
+1.  Linear Regression: simple linear and parametric model predicting
+    price based on all other variables.
+
+2.  k Nearest Neighbors: non-parametric and non-linear model. Takes in
+    parameter "k", and then finds the k number of observations closest
+    to each point, and averages to generate predictions.
+
+3.  Decision Tree: model that splits data repeatedly based on one
+    independent variable at a time.
+
+### Create Model
+
+```{r Model}
+
+## Linear Regression
+# Note: this is a bit tedious for just a linear model, compared to lm().
+lm_mod <- linear_reg() %>% 
+  set_mode("regression") %>%
+  set_engine("lm")
+
+## kNN
+knn_mod <- nearest_neighbor(
+  neighbors = 5) %>% 
+  set_mode("regression") %>% 
+  # can alternatively set mode to "classification"
+set_engine("kknn")
+
+## Decision Tree
+tree_mod <- decision_tree() %>% 
+  set_mode("regression") %>% 
+  set_engine("rpart")
+
+```
+
+### Define a Workflow
+
+```{r Workflows}
+
+# Linear model workflow
+lm_wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(lm_mod)
+
+# Let's see what's in the workflow
+lm_wf
+
+# kNN workflow
+knn_wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(knn_mod)
+
+# Decision tree workflow
+tree_wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(tree_mod)
+
+```
+
+### Run the Models
+
+```{r Train Models}
+
+# Run the linear model
+lm_res <- lm_wf %>% 
+  fit_resamples(resamples = split_cv, 
+                control = control_resamples(save_pred = T))
+
+# Use collect_metrics() to see the error rate (how well our model did)
+lm_res %>% collect_metrics()
+
+
+# Run the kNN
+knn_res <- knn_wf %>% 
+  fit_resamples(resamples = split_cv, 
+                control = control_resamples(save_pred = T))
+
+knn_res %>% collect_metrics()
+
+# Run the decision tree
+tree_res <- tree_wf %>% 
+  fit_resamples(resamples = split_cv, 
+                control = control_resamples(save_pred = T))
+
+tree_res %>% collect_metrics()
+
+# Let's compare the three models
+collect_metrics(lm_res) %>% 
+  bind_rows(collect_metrics(knn_res)) %>% 
+  bind_rows(collect_metrics(tree_res)) %>% 
+  filter(.metric == "rmse") %>% 
+  mutate(model = c("lm", "kNN", "tree")) %>% 
+  relocate(model) %>% 
+  arrange(mean)
+
+```
+
+## Tuning
+
+Now let's try tuning our kNN and decicision tree models. `tidymodels`
+makes it easy to vary hyperparameters and the evaluate each model.
+
+```{r Tune kNN}
+
+# New knn model, with neighbors set to tune k
+knn_mod2 <- nearest_neighbor(
+  neighbors = tune("k")) %>% 
+  set_mode("regression") %>% 
+set_engine("kknn")
+
+knn_wf2 <- workflow() %>% 
+  add_recipe(recipe) %>%
+  add_model(knn_mod2)
+
+# Set up grid for k to vary from 1 to 10
+k_grid <- tibble(k = c(1:10))
+
+# I just use this to save the outcomes--mostly useful for classification problems when you want to compare
+ctrl <- control_grid(save_pred = TRUE) 
+
+# Run the models for k 1-10
+set.seed(1234)
+doParallel::registerDoParallel() # parallel processing for speed
+tic() # time tuning
+
+knn_tuning <- knn_wf2 %>%
+  tune_grid(resamples = split_cv,
+            grid = k_grid,
+            control = ctrl)
+
+toc()
+# Took about 8 minutes normal, 4.8 min parallel
+
+knn_metrics <- knn_tuning %>%
+  collect_metrics()
+
+# Let's look at the performance of the models
+knn_metrics %>% dplyr::filter(.metric == 'rmse') %>% 
+  arrange(mean)
+
+# Looks like k = 7 is best
+
+# Use autoplot to visualize accuracy metrics
+autoplot(knn_tuning) + ggtitle(bquote("RMSE and"~R^2~ "for K 1-10"))
+
+# Can now use select_best to pick the best model to use in future iterations
+knn_best <- select_best(knn_tuning, metric = "rmse")
+
+```
+
+Let's tune our decision tree to show how we can tune multiple parameters
+at once.
+
+```{r Tune Tree}
+
+# New decision tree model. Tuning:
+  # tree_depth: how many nodes in the tree 
+  # min_n: how many data points before splitting
+  # and cost complexity:  
+tree_mod2 <- decision_tree(
+  cost_complexity = tune(),
+  tree_depth = tune(),
+  min_n = tune()) %>% 
+  set_mode("regression") %>% 
+set_engine("rpart")
+
+tree_grid <- grid_regular(cost_complexity(),
+                          tree_depth(),
+                          min_n(),
+                          levels = 3)
+
+tree_wf2 <- workflow() %>% 
+  add_recipe(recipe) %>%
+  add_model(tree_mod2)
+
+set.seed(1234)
+doParallel::registerDoParallel()
+tic()
+
+tree_tuning <- tree_wf2 %>% 
+  tune_grid(resamples = split_cv,
+            grid = tree_grid)
+
+toc() # 5.8 minutes
+
+# Visualize and compare performance across the parameter combinations
+autoplot(tree_tuning, metric = "rmse") +
+  ggtitle("RMSE for Tuning of Decision Tree")
+
+# Tree depth of 1 doesn't improve, always has high error
+# Tree depth of 15 has the lowest error
+# And it looks like a low cost is best, so we want to keep model complex 
+# Lastly, 21 nodes performs best
+
+# Let's see metrics in df form
+tree_tuning %>% collect_metrics() %>% 
+  filter(.metric == "rmse") %>% 
+  arrange(mean)
+
+# Choose best
+tree_best <- tree_tuning %>% select_best(metric = "rmse")
+
+```
+
+## Validate
+
+To finish, let's fit our best model to the test set adn see how it does.
+To do this, we'll select our best model, finalize our workflow, and then
+use `last_fit` to run the model on the test set.
+
+```{r}
+
+# Finalize workflow (update it to use the best tuned model)
+final_wf <- tree_wf2 %>% 
+  finalize_workflow(tree_best)
+
+# Fit to the test set
+set.seed(1234)
+final_fit <- final_wf %>% 
+  last_fit(split)
+
+# Evaluate test set performance
+final_fit %>% collect_metrics()
+
+doParallel::stopImplicitCluster()
+
+```
+
+# Final Notes
+
+An additional `tidymodels` package, `usemodels`, writes model code for
+you! For example, here we specify our formula and model type (kNN), and
+it outputs a recipe, model, and workflow. You can then edit for any
+corrections/other needs.
+
+```{r usemodels}
+
+library(usemodels)
+
+use_kknn(price ~., data = diamonds)
+
+```
+
+## Resources
+
+-   [The Tidy Modeling with R book](https://www.tmwr.org/)
+-   [Julia Silge's blog](https://juliasilge.com/blog) is a great
+    resource for `tidymodels` tips. Every other Tuesday she uploads a
+    demo.
